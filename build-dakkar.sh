@@ -118,7 +118,7 @@ function get_rom_type() {
                 ;;
             aosp10)
                 mainrepo="https://android.googlesource.com/platform/manifest.git"
-                mainbranch="android-10.0.0_r25"
+                mainbranch="android-10.0.0_r41"
                 localManifestBranch="android-10.0"
                 treble_generate=""
                 extra_make_options=""
@@ -284,14 +284,6 @@ function get_rom_type() {
                 extra_make_options="WITHOUT_CHECK_API=true"
                 jack_enabled="false"
                 ;;
-	    graphene9)
-	    	mainrepo="https://github.com/GrapheneOS/platform_manifest.git"
-		mainbranch="pie"
-		localManifestBranch="android-9.0"
-		treble_generate="graphene"
-		extra_make_options="WITHOUT_CHECK_API=true"
-		jack_enabled="false"
-                ;;
 	   graphene10)
 	   	mainrepo="https://github.com/GrapheneOS/platform_manifest.git"
 		mainbranch="10"
@@ -398,9 +390,28 @@ function init_local_manifest() {
     clone_or_checkout .repo/local_manifests treble_manifest
 }
 
+download_patches() {
+	echo "Downloading Patches..."
+	if [[ $localManifestBranch == android-10.0 ]];then
+		githubMatch=v2..
+	elif [[ $localManifestBranch == android-9.0 ]];then
+		githubMatch=v1..
+	else
+		githubMatch=v..
+	fi
+    jq --help > /dev/null
+	wantedRelease="$(curl --silent https://api.github.com/repos/phhusson/treble_experimentations/releases |jq -r '.[] | .tag_name' |grep -E "$githubMatch\$" |sort -V | tail -n 1)"
+	wget "https://github.com/phhusson/treble_experimentations/releases/download/$wantedRelease/patches.zip" -O patches.zip
+	rm -Rf patches
+	unzip patches.zip -d patches
+  echo "   ...done Downloading Patches"
+}
+
 function init_patches() {
+    echo "Initializing Patches..."
+    echo "   ...treble_generate="$treble_generate
     if [[ -n "$treble_generate" ]]; then
-        clone_or_checkout patches treble_patches
+	download_patches
 
         # We don't want to replace from AOSP since we'll be applying
         # patches by hand
@@ -414,6 +425,7 @@ function init_patches() {
         # should I do this? will it interfere with building non-gapps images?
         # rm -f .repo/local_manifests/opengapps.xml
     fi
+    echo "   ...done Initializing Patches"
 }
 
 function sync_repo() {
@@ -421,7 +433,10 @@ function sync_repo() {
 }
 
 function patch_things() {
+    echo "Patching Things..."
+    echo "   ...treble_generate="$treble_generate
     if [[ -n "$treble_generate" ]]; then
+        echo "   ...removing sepolicies"
         rm -f device/*/sepolicy/common/private/genfs_contexts
         (
             cd device/phh/treble
@@ -432,15 +447,43 @@ function patch_things() {
         )
         bash "$(dirname "$0")/apply-patches.sh" patches
     else
+        echo "   ...generating Makefiles"
         (
             cd device/phh/treble
             git clean -fdx
             bash generate.sh
         )
+        echo "   ...calling list-patches.sh"
         repo manifest -r > release/"$rom_fp"/manifest.xml
         bash "$(dirname "$0")"/list-patches.sh
         cp patches.zip release/"$rom_fp"/patches.zip
     fi
+}
+
+function fix_missings() {
+	if [[ "$localManifestBranch" == *"9"* ]]; then
+	        rm -rf vendor/*/packages/overlays/NoCutout*
+		# fix kernel source missing (on pie)
+		sed 's;.*KERNEL_;//&;' -i vendor/*/build/soong/Android.bp 2>/dev/null || true
+		mkdir -p device/sample/etc
+		cd device/sample/etc/
+		curl "https://android.googlesource.com/device/sample/+/refs/tags/android-9.0.0_r59/etc/apns-full-conf.xml?format=TEXT"| base64 --decode > apns-full-conf.xml
+		cd ../../..
+	fi
+	if [[ "$localManifestBranch" == *"10"* ]]; then
+	        rm -rf vendor/*/packages/overlays/NoCutout*
+		# fix kernel source missing (on Q)
+		sed 's;.*KERNEL_;//&;' -i vendor/*/build/soong/Android.bp 2>/dev/null || true
+		mkdir -p device/sample/etc
+		cd device/sample/etc
+		curl "https://raw.githubusercontent.com/LineageOS/android_vendor_lineage/lineage-17.1/prebuilt/common/etc/apns-conf.xml" > apns-conf.xml
+		cd ../../..
+		mkdir -p device/generic/common/nfc
+		cd device/generic/common/nfc
+		curl "https://android.googlesource.com/device/generic/common/+/refs/tags/android-10.0.0_r40/nfc/libnfc-nci.conf?format=TEXT"| base64 --decode > libnfc-nci.conf
+		cd ../../../..
+		sed -i '/Copies the APN/,/include $(BUILD_PREBUILT)/{/include $(BUILD_PREBUILT)/ s/.*/ /; t; d}' vendor/*/prebuilt/common/Android.mk 2>/dev/null || true
+	fi
 }
 
 function build_variant() {
@@ -487,6 +530,7 @@ if [[ $build_dakkar_choice == *"y"* ]];then
     init_local_manifest
     init_patches
     sync_repo
+    fix_missings
 fi
 
 patch_things
